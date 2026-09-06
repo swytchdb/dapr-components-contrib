@@ -1,0 +1,65 @@
+# yaml-language-server: $schema=../../component-metadata-schema.json
+schemaVersion: v1
+type: state
+name: swytch
+version: v1
+status: alpha
+title: "Swytch"
+urls:
+  - title: Reference
+    url: https://docs.dapr.io/reference/components-reference/supported-state-stores/setup-swytch/
+capabilities:
+  - actorStateStore
+  - crud
+  - transactional
+  - etag
+  - query
+  - ttl
+authenticationProfiles:
+  - title: Leaderless Join
+    description: Form a cluster without any coordinator using DNS discovery
+    metadata:
+      - name: discovery
+        type: string
+        required: false
+        description: "A DNS name pointing to other Swytch instances to join the cluster"
+        example: "swytch.dapr.svc.cluster.local"
+      - name: clusterPassword
+        type: string
+        required: false
+        sensitive: true
+        description: "The password to use when joining a DNS cluster"
+        example: "securePassword"
+  - title: Cloud Join
+    description: Form a cluster using Swytch Cloud and durability
+    metadata:
+      - name: cloud
+        type: string
+        required: false
+        sensitive: true
+        description: "The Swytch Cloud token"
+        example: "abscwer234232rhfhdszids_qwerefd"
+metadata:
+  - name: "memory-limit"
+    required: false
+    description: "A target for the Dapr process's live Go heap; Swytch evicts cold cached keys when this is exceeded (e.g. 100MB, 20%)"
+    type: string
+    default: "80%"
+    example: "80%"
+  - name: clusterPort
+    required: false
+    description: "The UDP port used for QUIC cluster traffic"
+    type: number
+    default: "7380"
+    example: "7380"
+  - name: advertiseAddress
+    required: false
+    description: "The host and port advertised to other Swytch nodes; auto-detected when omitted"
+    type: string
+    example: "10.0.0.12:7380"
+  - name: compress
+    required: false
+    description: "Compress values stored in Swytch effects"
+    type: bool
+    default: "false"
+    example: "true"
