@@ -103,6 +103,6 @@ func parseMetadata(meta state.Metadata) (beacon.RuntimeConfig, error) {
 // GetComponentMetadata exposes the accepted metadata fields to Dapr's
 // metadata analyzer.
 func (s *SwytchStore) GetComponentMetadata() (metadataInfo metadata.MetadataMap) {
-	_ = metadata.GetMetadataInfoFromStructType(reflect.TypeOf(swytchMetadata{}), &metadataInfo, metadata.StateStoreType)
+	_ = metadata.GetMetadataInfoFromStructType(reflect.TypeFor[swytchMetadata](), &metadataInfo, metadata.StateStoreType)
 	return metadataInfo
 }

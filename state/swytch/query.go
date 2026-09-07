@@ -191,7 +191,7 @@ func matchesComparison(value any, key string, expected any, predicate func(int) 
 
 func lookupPath(value any, path string) (any, bool) {
 	current := value
-	for _, part := range strings.Split(strings.TrimPrefix(path, "."), ".") {
+	for part := range strings.SplitSeq(strings.TrimPrefix(path, "."), ".") {
 		if part == "" {
 			continue
 		}

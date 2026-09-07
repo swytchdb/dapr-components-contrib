@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -649,13 +650,13 @@ func lockEngineKeys(engine *effects.Engine, keys []string) func() {
 	for stripe := range stripeKeys {
 		stripes = append(stripes, stripe)
 	}
-	sort.Slice(stripes, func(i, j int) bool { return stripes[i] < stripes[j] })
+	slices.Sort(stripes)
 	for _, stripe := range stripes {
 		engine.GetLock(stripeKeys[stripe]).Lock()
 	}
 	return func() {
-		for i := len(stripes) - 1; i >= 0; i-- {
-			engine.GetLock(stripeKeys[stripes[i]]).Unlock()
+		for _, stripe := range slices.Backward(stripes) {
+			engine.GetLock(stripeKeys[stripe]).Unlock()
 		}
 	}
 }
