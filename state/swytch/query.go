@@ -44,13 +44,13 @@ func (s *SwytchStore) Query(ctx context.Context, req *state.QueryRequest) (*stat
 		return nil, err
 	}
 
-	s.runtimeMu.RLock()
-	defer s.runtimeMu.RUnlock()
-	if s.runtime == nil {
-		return nil, errNotInitialized
+	engine, release, err := s.runtime.Acquire()
+	if err != nil {
+		return nil, err
 	}
+	defer release()
 
-	keys := s.runtime.Engine.MatchKeys("*")
+	keys := engine.MatchKeys("*")
 	rows := make([]queryRow, 0, len(keys))
 	for _, key := range keys {
 		if strings.HasPrefix(key, "__swytch:") {
@@ -59,7 +59,7 @@ func (s *SwytchStore) Query(ctx context.Context, req *state.QueryRequest) (*stat
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		snap, tips, err := s.runtime.Engine.NewReadOnlyContext().GetSnapshot(key)
+		snap, tips, err := engine.NewReadOnlyContext().GetSnapshot(key)
 		if err != nil {
 			return nil, err
 		}

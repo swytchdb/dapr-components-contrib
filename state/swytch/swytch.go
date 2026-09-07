@@ -23,28 +23,22 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
+	swytchcomponent "github.com/dapr/components-contrib/common/component/swytch"
 	"github.com/dapr/components-contrib/state"
 	stateutils "github.com/dapr/components-contrib/state/utils"
 	"github.com/dapr/kit/logger"
-	"github.com/swytchdb/engine/beacon"
 	pb "github.com/swytchdb/engine/cluster/proto"
 	"github.com/swytchdb/engine/effects"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-var errNotInitialized = errors.New("swytch state store is not initialized")
-
 // SwytchStore is a Dapr state store backed by the Swytch effects engine.
 type SwytchStore struct {
 	state.BulkStore
 
-	log logger.Logger
-
-	runtimeMu sync.RWMutex
-	runtime   *beacon.Runtime
+	runtime *swytchcomponent.Runtime
 }
 
 // NewSwytchStateStore returns a Swytch state store as a Dapr state.Store.
@@ -54,40 +48,14 @@ func NewSwytchStateStore(log logger.Logger) state.Store {
 
 // NewSwytchStore returns a new Swytch state store.
 func NewSwytchStore(log logger.Logger) *SwytchStore {
-	store := &SwytchStore{log: log}
+	store := &SwytchStore{runtime: swytchcomponent.NewRuntime(log)}
 	store.BulkStore = state.NewDefaultBulkStore(store)
 	return store
 }
 
 // Init starts the embedded Swytch runtime.
 func (s *SwytchStore) Init(ctx context.Context, metadata state.Metadata) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	cfg, err := parseMetadata(metadata)
-	if err != nil {
-		return err
-	}
-
-	s.runtimeMu.Lock()
-	defer s.runtimeMu.Unlock()
-	if s.runtime != nil {
-		return errors.New("swytch state store is already initialized")
-	}
-
-	// Engine v1.0.3 does not yet accept a context. Keep the join synchronous:
-	// serving before convergence would violate Dapr transaction/ETag semantics.
-	runtime, err := beacon.NewRuntime(cfg)
-	if err != nil {
-		return fmt.Errorf("start swytch runtime: %w", err)
-	}
-	if err = ctx.Err(); err != nil {
-		return errors.Join(err, runtime.Stop())
-	}
-	s.runtime = runtime
-	s.log.Infof("Swytch state store initialized with node ID %d", runtime.Engine.NodeID())
-	return nil
+	return s.runtime.Start(ctx, metadata.Base)
 }
 
 // Features returns the capabilities implemented by this store.
@@ -114,17 +82,17 @@ func (s *SwytchStore) Get(ctx context.Context, req *state.GetRequest) (*state.Ge
 		return nil, err
 	}
 
-	s.runtimeMu.RLock()
-	defer s.runtimeMu.RUnlock()
-	if s.runtime == nil {
-		return nil, errNotInitialized
+	engine, release, err := s.runtime.Acquire()
+	if err != nil {
+		return nil, err
 	}
+	defer release()
 
-	lock := s.runtime.Engine.GetLock(req.Key)
+	lock := engine.GetLock(req.Key)
 	lock.Lock()
 	defer lock.Unlock()
 
-	snap, tips, err := s.runtime.Engine.NewReadOnlyContext().GetSnapshot(req.Key)
+	snap, tips, err := engine.NewReadOnlyContext().GetSnapshot(req.Key)
 	if err != nil {
 		return nil, err
 	}
@@ -151,16 +119,16 @@ func (s *SwytchStore) Set(ctx context.Context, req *state.SetRequest) error {
 		return err
 	}
 
-	s.runtimeMu.RLock()
-	defer s.runtimeMu.RUnlock()
-	if s.runtime == nil {
-		return errNotInitialized
+	engine, release, err := s.runtime.Acquire()
+	if err != nil {
+		return err
 	}
+	defer release()
 
-	unlock := lockEngineKeys(s.runtime.Engine, []string{req.Key})
+	unlock := lockEngineKeys(engine, []string{req.Key})
 	defer unlock()
 
-	engineCtx := s.runtime.Engine.NewContext()
+	engineCtx := engine.NewContext()
 	engineCtx.SetTraceCtx(ctx)
 	conditional := req.HasETag() || req.Options.Concurrency == state.FirstWrite
 	if conditional {
@@ -212,16 +180,16 @@ func (s *SwytchStore) Delete(ctx context.Context, req *state.DeleteRequest) erro
 		return err
 	}
 
-	s.runtimeMu.RLock()
-	defer s.runtimeMu.RUnlock()
-	if s.runtime == nil {
-		return errNotInitialized
+	engine, release, err := s.runtime.Acquire()
+	if err != nil {
+		return err
 	}
+	defer release()
 
-	unlock := lockEngineKeys(s.runtime.Engine, []string{req.Key})
+	unlock := lockEngineKeys(engine, []string{req.Key})
 	defer unlock()
 
-	engineCtx := s.runtime.Engine.NewContext()
+	engineCtx := engine.NewContext()
 	engineCtx.SetTraceCtx(ctx)
 	conditional := req.HasETag() || req.Options.Concurrency == state.FirstWrite
 	if conditional {
@@ -274,20 +242,20 @@ func (s *SwytchStore) Multi(ctx context.Context, request *state.TransactionalSta
 		return err
 	}
 
-	s.runtimeMu.RLock()
-	defer s.runtimeMu.RUnlock()
-	if s.runtime == nil {
-		return errNotInitialized
+	engine, release, err := s.runtime.Acquire()
+	if err != nil {
+		return err
 	}
+	defer release()
 
 	keys := make([]string, len(operations))
 	for i := range operations {
 		keys[i] = operations[i].key
 	}
-	unlock := lockEngineKeys(s.runtime.Engine, keys)
+	unlock := lockEngineKeys(engine, keys)
 	defer unlock()
 
-	engineCtx := s.runtime.Engine.NewContext()
+	engineCtx := engine.NewContext()
 	engineCtx.SetTraceCtx(ctx)
 	engineCtx.BeginTx()
 	for i := range operations {
@@ -312,19 +280,19 @@ func (s *SwytchStore) DeleteWithPrefix(ctx context.Context, req state.DeleteWith
 		return state.DeleteWithPrefixResponse{}, err
 	}
 
-	s.runtimeMu.RLock()
-	defer s.runtimeMu.RUnlock()
-	if s.runtime == nil {
-		return state.DeleteWithPrefixResponse{}, errNotInitialized
+	engine, release, err := s.runtime.Acquire()
+	if err != nil {
+		return state.DeleteWithPrefixResponse{}, err
 	}
+	defer release()
 
-	keys := s.runtime.Engine.MatchKeys("*")
+	keys := engine.MatchKeys("*")
 	matched := make([]string, 0)
 	for _, key := range keys {
 		if !strings.HasPrefix(key, req.Prefix) || strings.Contains(key[len(req.Prefix):], "||") {
 			continue
 		}
-		snap, _, err := s.runtime.Engine.NewReadOnlyContext().GetSnapshot(key)
+		snap, _, err := engine.NewReadOnlyContext().GetSnapshot(key)
 		if err != nil {
 			return state.DeleteWithPrefixResponse{}, err
 		}
@@ -336,9 +304,9 @@ func (s *SwytchStore) DeleteWithPrefix(ctx context.Context, req state.DeleteWith
 		return state.DeleteWithPrefixResponse{}, nil
 	}
 
-	unlock := lockEngineKeys(s.runtime.Engine, matched)
+	unlock := lockEngineKeys(engine, matched)
 	defer unlock()
-	engineCtx := s.runtime.Engine.NewContext()
+	engineCtx := engine.NewContext()
 	engineCtx.SetTraceCtx(ctx)
 	engineCtx.BeginTx()
 	var count int64
@@ -380,19 +348,19 @@ func (s *SwytchStore) KeysLike(ctx context.Context, req *state.KeysLikeRequest) 
 		return nil, fmt.Errorf("invalid pattern: %w", err)
 	}
 
-	s.runtimeMu.RLock()
-	defer s.runtimeMu.RUnlock()
-	if s.runtime == nil {
-		return nil, errNotInitialized
+	engine, release, err := s.runtime.Acquire()
+	if err != nil {
+		return nil, err
 	}
+	defer release()
 
-	keys := s.runtime.Engine.MatchKeys(glob)
+	keys := engine.MatchKeys(glob)
 	live := keys[:0]
 	for _, key := range keys {
 		if err = ctx.Err(); err != nil {
 			return nil, err
 		}
-		snap, _, getErr := s.runtime.Engine.NewReadOnlyContext().GetSnapshot(key)
+		snap, _, getErr := engine.NewReadOnlyContext().GetSnapshot(key)
 		if getErr != nil {
 			return nil, getErr
 		}
@@ -424,14 +392,10 @@ func (s *SwytchStore) KeysLike(ctx context.Context, req *state.KeysLikeRequest) 
 
 // Close stops the embedded runtime after all active operations finish.
 func (s *SwytchStore) Close() error {
-	s.runtimeMu.Lock()
-	defer s.runtimeMu.Unlock()
 	if s.runtime == nil {
 		return nil
 	}
-	runtime := s.runtime
-	s.runtime = nil
-	return runtime.Stop()
+	return s.runtime.Close()
 }
 
 type preparedOperation struct {
@@ -526,33 +490,15 @@ func applyOperation(engineCtx *effects.Context, operation *preparedOperation) er
 }
 
 func emitSet(engineCtx *effects.Context, key string, data []byte, tips []effects.Tip) error {
-	return engineCtx.Emit(&pb.Effect{
-		Key: []byte(key),
-		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
-			Op:         pb.EffectOp_INSERT_OP,
-			Merge:      pb.MergeRule_LAST_WRITE_WINS,
-			Collection: pb.CollectionKind_SCALAR,
-			Value:      &pb.DataEffect_Raw{Raw: data},
-		}},
-	}, tips)
+	return swytchcomponent.EmitScalar(engineCtx, key, data, tips)
 }
 
 func emitTTL(engineCtx *effects.Context, key string, expiresAt *timestamppb.Timestamp) error {
-	return engineCtx.Emit(&pb.Effect{
-		Key:  []byte(key),
-		Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{ExpiresAt: expiresAt}},
-	})
+	return swytchcomponent.EmitExpiration(engineCtx, key, expiresAt)
 }
 
 func emitDelete(engineCtx *effects.Context, key string, tips []effects.Tip) error {
-	return engineCtx.Emit(&pb.Effect{
-		Key: []byte(key),
-		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
-			Op:         pb.EffectOp_REMOVE_OP,
-			Merge:      pb.MergeRule_LAST_WRITE_WINS,
-			Collection: pb.CollectionKind_SCALAR,
-		}},
-	}, tips)
+	return swytchcomponent.EmitDelete(engineCtx, key, tips)
 }
 
 func marshalValue(value any) ([]byte, error) {
@@ -571,15 +517,14 @@ func expirationFromMetadata(metadata map[string]string) (*timestamppb.Timestamp,
 }
 
 func snapshotExists(snap *pb.ReducedEffect) bool {
-	return snap != nil && snap.Scalar != nil
+	return swytchcomponent.SnapshotExists(snap)
 }
 
 func responseFromSnapshot(snap *pb.ReducedEffect, tips []effects.Tip) *state.GetResponse {
 	if !snapshotExists(snap) {
 		return &state.GetResponse{}
 	}
-	data := snap.Scalar.Decompress()
-	result := &state.GetResponse{Data: append([]byte(nil), data...)}
+	result := &state.GetResponse{Data: swytchcomponent.ScalarValue(snap)}
 	if snap.ExpiresAt != nil {
 		result.Metadata = map[string]string{
 			state.GetRespMetaKeyTTLExpireTime: snap.ExpiresAt.AsTime().UTC().Format(time.RFC3339),
@@ -634,39 +579,8 @@ func validateETag(key string, snap *pb.ReducedEffect, tips []effects.Tip, reques
 	return nil
 }
 
-// lockEngineKeys takes each engine stripe at most once and in stripe order.
-// Sorting by key alone is insufficient because distinct keys can hash to the
-// same striped mutex.
 func lockEngineKeys(engine *effects.Engine, keys []string) func() {
-	stripeKeys := make(map[uint32]string, len(keys))
-	for _, key := range keys {
-		stripe := lockStripe(key)
-		if _, ok := stripeKeys[stripe]; !ok {
-			stripeKeys[stripe] = key
-		}
-	}
-	stripes := make([]uint32, 0, len(stripeKeys))
-	for stripe := range stripeKeys {
-		stripes = append(stripes, stripe)
-	}
-	sort.Slice(stripes, func(i, j int) bool { return stripes[i] < stripes[j] })
-	for _, stripe := range stripes {
-		engine.GetLock(stripeKeys[stripe]).Lock()
-	}
-	return func() {
-		for i := len(stripes) - 1; i >= 0; i-- {
-			engine.GetLock(stripeKeys[stripes[i]]).Unlock()
-		}
-	}
-}
-
-func lockStripe(key string) uint32 {
-	hash := uint32(2166136261)
-	for i := 0; i < len(key); i++ {
-		hash ^= uint32(key[i])
-		hash *= 16777619
-	}
-	return hash & 4095
+	return swytchcomponent.LockKeys(engine, keys)
 }
 
 func likeToGlob(pattern string) (string, error) {
